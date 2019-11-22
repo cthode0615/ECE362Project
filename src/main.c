@@ -158,6 +158,137 @@ void TIM3_IRQHandler()
 
 }
 
+//BEGIN SPI/LCD DISPLAY SECTION
+//global variables:
+int scrollcounter = 0;
+int difficulty = 0;
+const char *select_diff = "****************Select difficulty level****************";
+
+void nano_wait(unsigned int n) {
+    asm(    "        mov r0,%0\n"
+            "repeat: sub r0,#83\n"
+            "        bgt repeat\n" : : "r"(n) : "r0", "cc");
+}
+
+void spi_cmd(char b) {
+    while((SPI2->SR & SPI_SR_TXE) == 0);     //wait for TXE to be 1
+    SPI2->DR = b;
+}
+
+void spi_data(char b) {
+    while((SPI2->SR & SPI_SR_TXE) == 0);     //wait for TXE to be 1
+    SPI2->DR = 0x200 + b;
+}
+
+void generic_lcd_startup(void) {
+    nano_wait(100000000); // Give it 100ms to initialize
+    spi_cmd(0x38);  // 0011 NF00 N=1, F=0: two lines
+    spi_cmd(0x0c);  // 0000 1DCB: display on, no cursor, no blink
+    spi_cmd(0x01);  // clear entire display
+    nano_wait(6200000); // clear takes 6.2ms to complete
+    spi_cmd(0x02);  // put the cursor in the home position
+    spi_cmd(0x06);  // 0000 01IS: set display to increment
+}
+
+void spi_init_lcd(void) {
+    //CONFIGURE GPIO PINS
+    RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+    //set PB12,13,15 to alternate function
+    GPIOB->MODER |= GPIO_Mode_AF<<(2*12);
+    GPIOB->MODER |= GPIO_Mode_AF<<(2*13);
+    GPIOB->MODER |= GPIO_Mode_AF<<(2*15);
+    //alternate functions should already be configured (AF 0000 = SPI)
+
+    //CONFIGURE SPI2 REGISTERS
+    RCC->APB1ENR |= RCC_APB1ENR_SPI2EN;
+    SPI2->CR1 |= SPI_CR1_BIDIMODE;  //bidirectional mode
+    SPI2->CR1 |= SPI_CR1_BIDIOE;    //bidirectional output enabled
+    SPI2->CR1 |= SPI_CR1_MSTR;      //set as master
+    SPI2->CR1 |= SPI_CR1_BR_2;      //slowest possible baud rate (BR=111, Baud rate = 187.5 kHz)
+    SPI2->CR1 |= SPI_CR1_BR_1;
+    SPI2->CR1 |= SPI_CR1_BR_0;
+    SPI2->CR2 = SPI_CR2_DS_3 | SPI_CR2_DS_0 | SPI_CR2_SSOE | SPI_CR2_NSSP;   //10 bit word size (DS = 1001)
+    SPI2->CR1 |= SPI_CR1_SPE;       //enable the channel
+
+    generic_lcd_startup();
+
+}
+
+void spi_display1(const char *s) {
+    //Displays a string on the first line of the LCD
+    spi_cmd(0x80 + 0);
+    int x;
+    for(x=0; x<16; x+=1)
+        if (s[x])
+            spi_data(s[x]);
+        else
+            break;
+    for(   ; x<16; x+=1)
+        spi_data(' ');
+}
+
+void spi_display2(const char *s) {
+    //Displays a string on the second line of the LCD
+    spi_cmd(0x80 + 64);
+    int x;
+    for(x=0; x<16; x+=1)
+        if (s[x])
+            spi_data(s[x]);
+        else
+            break;
+    for(   ; x<16; x+=1)
+        spi_data(' ');
+}
+
+void spi_char_display2(char b)
+{
+    //Displays a single character on the second line of the LCD
+    spi_cmd(0x80 + 64);
+    spi_data(b);
+}
+
+void spi_scroll1(const char *msg)
+{
+    //Every time this function runs, it steps through 1 step of the scroll
+    //Therefore msg will continue scrolling as long as spi_scroll1 is looping
+    //The scroll appears on line 2 of the LCD
+    spi_display1(&msg[scrollcounter]);
+    nano_wait(100000000);
+    scrollcounter++;
+    if(scrollcounter >= 40)
+        scrollcounter = 0;
+}
+
+void init_button(void)
+{
+    RCC->AHBENR |= RCC_AHBENR_GPIOCEN;
+    GPIOC->MODER &= ~(3 << (2*7));      //set PC7 to input
+}
+
+void init_exti(void)
+{
+    //Trigger an interrupt on the rising edge of PC7 (button)
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    SYSCFG->EXTICR[1] |= SYSCFG_EXTICR2_EXTI7_PC;
+    EXTI->RTSR |= EXTI_RTSR_TR7;
+    EXTI->IMR |= EXTI_IMR_MR7;
+    NVIC->ISER[0] |= 1<<EXTI4_15_IRQn;
+}
+
+void EXTI4_15_IRQHandler(void)
+{
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    EXTI->PR |= EXTI_PR_PR7;
+
+    difficulty++;
+    if(difficulty > 5)
+        difficulty = 1;
+    spi_display1("Level selected:");
+    spi_char_display2((char) (difficulty + 48));
+
+}
+
+
 
 int main(void)
 {
@@ -165,7 +296,12 @@ int main(void)
 	init_GPIO();
 	init_tim6();
 	init_tim3();
-
+    	spi_init_lcd();
+    	init_button();
+    	init_exti();	
+	
+	while((GPIOC->IDR & GPIO_IDR_7) != GPIO_IDR_7)
+        	spi_scroll1(select_diff);
 	while(1){
 		asm("nop");
 	}
